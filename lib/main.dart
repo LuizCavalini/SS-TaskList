@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -16,6 +17,11 @@ const erroCor = Color(0xFFF07167);
 const perigo = Color(0xFFC0392B);
 
 const corItem = Color(0xFF222A33);
+
+const altura = 48.0;
+const duracao = Duration(milliseconds: 700);
+const curva = Curves.easeInOutCubic;
+const inclinacao = 0.09;
 
 void main() => runApp(const App());
 
@@ -601,12 +607,20 @@ class _ListaState extends State<Lista> {
   final cursor = FocusNode();
   final itens = <Tarefa>[];
   final apagando = <String, Timer>{};
+  final rolagem = ScrollController();
+  final chaveLista = GlobalKey<AnimatedListState>();
 
   bool carregando = true;
   bool temLista = false;
   bool saiu = false;
   String status = 'carregando...';
   String? alerta;
+
+  Tarefa? voando;
+  double origem = 0;
+  bool decolou = false;
+  int voo = 0;
+  Timer? pouso;
 
   int get pendentes => itens.where((t) => !t.feito).length;
 
@@ -622,14 +636,18 @@ class _ListaState extends State<Lista> {
       timer.cancel();
     }
     apagando.clear();
+    pouso?.cancel();
+    rolagem.dispose();
     campo.dispose();
     cursor.dispose();
     super.dispose();
   }
 
   void carregar() async {
+    pouso?.cancel();
     setState(() {
       carregando = true;
+      voando = null;
       status = 'carregando...';
     });
 
@@ -773,21 +791,82 @@ class _ListaState extends State<Lista> {
       return;
     }
 
+    final posicao = pendentes;
     setState(() {
-      itens.insert(pendentes, Tarefa(titulo));
+      itens.insert(posicao, Tarefa(titulo));
       alerta = null;
       campo.clear();
     });
+    chaveLista.currentState?.insertItem(posicao, duration: Duration.zero);
     cursor.requestFocus();
     salvar();
   }
 
   void marcar(Tarefa item) {
+    if (item.feito) {
+      desconcluir(item);
+    } else {
+      concluir(item);
+    }
+  }
+
+  void concluir(Tarefa item) {
+    final de = itens.indexWhere((t) => t.titulo == item.titulo);
+    if (de < 0) return;
+
+    final lista = chaveLista.currentState;
+    pouso?.cancel();
+
     setState(() {
-      itens.removeWhere((t) => t.titulo == item.titulo);
-      item.feito = !item.feito;
-      itens.insert(pendentes, item);
+      itens.removeAt(de);
+      item.feito = true;
+      final para = pendentes;
+      itens.insert(para, item);
+
+      voando = item;
+      origem = de * altura;
+      decolou = false;
+      voo++;
+
+      lista?.removeItem(
+        de,
+        (context, animacao) => lacuna(animacao),
+        duration: duracao,
+      );
+      lista?.insertItem(para, duration: duracao);
     });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() => decolou = true);
+    });
+
+    pouso = Timer(duracao + const Duration(milliseconds: 50), () {
+      if (mounted) setState(() => voando = null);
+    });
+
+    salvar();
+  }
+
+  void desconcluir(Tarefa item) {
+    final de = itens.indexWhere((t) => t.titulo == item.titulo);
+    if (de < 0) return;
+
+    final lista = chaveLista.currentState;
+
+    setState(() {
+      itens.removeAt(de);
+      item.feito = false;
+      final para = pendentes;
+      itens.insert(para, item);
+
+      lista?.removeItem(
+        de,
+        (context, animacao) => const SizedBox.shrink(),
+        duration: Duration.zero,
+      );
+      lista?.insertItem(para, duration: Duration.zero);
+    });
+
     salvar();
   }
 
@@ -799,7 +878,19 @@ class _ListaState extends State<Lista> {
     apagando[item.titulo] = Timer(const Duration(seconds: 3), () {
       apagando.remove(item.titulo);
       if (!mounted) return;
-      setState(() => itens.removeWhere((t) => t.titulo == item.titulo));
+
+      final i = itens.indexWhere((t) => t.titulo == item.titulo);
+      if (i < 0) return;
+
+      setState(() {
+        itens.removeAt(i);
+        if (voando?.titulo == item.titulo) voando = null;
+      });
+      chaveLista.currentState?.removeItem(
+        i,
+        (context, animacao) => const SizedBox.shrink(),
+        duration: Duration.zero,
+      );
       salvar();
     });
   }
@@ -959,15 +1050,24 @@ class _ListaState extends State<Lista> {
           child: CircularProgressIndicator(color: acento, strokeWidth: 2.5),
         ),
       );
-    } else if (itens.isEmpty) {
-      dentro = const Center(
-        child: Icon(Icons.task_alt, size: 40, color: divisor),
-      );
     } else {
-      dentro = ListView.builder(
-        padding: EdgeInsets.zero,
-        itemCount: itens.length,
-        itemBuilder: (context, i) => linha(itens[i]),
+      dentro = Stack(
+        fit: StackFit.expand,
+        children: [
+          AnimatedList(
+            key: chaveLista,
+            controller: rolagem,
+            padding: EdgeInsets.zero,
+            initialItemCount: itens.length,
+            itemBuilder: (context, i, animacao) =>
+                itemAnimado(itens[i], animacao),
+          ),
+          if (itens.isEmpty)
+            const Center(
+              child: Icon(Icons.task_alt, size: 40, color: divisor),
+            ),
+          if (voando != null) fantasma(voando!),
+        ],
       );
     }
 
@@ -982,10 +1082,61 @@ class _ListaState extends State<Lista> {
     );
   }
 
-  Widget linha(Tarefa item) {
-    final cor = item.apagando ? const Color(0xFF4A2220) : corItem;
-    final tinta = item.feito ? textoFraco : texto;
+  Widget itemAnimado(Tarefa item, Animation<double> animacao) {
+    final escondido = voando?.titulo == item.titulo;
 
+    return SizeTransition(
+      sizeFactor: animacao.drive(CurveTween(curve: curva)),
+      child: IgnorePointer(
+        ignoring: escondido,
+        child: Opacity(
+          opacity: escondido ? 0 : 1,
+          child: linha(item),
+        ),
+      ),
+    );
+  }
+
+  Widget lacuna(Animation<double> animacao) {
+    return SizeTransition(
+      sizeFactor: animacao.drive(CurveTween(curve: curva)),
+      child: Container(height: altura, color: corItem),
+    );
+  }
+
+  Widget fantasma(Tarefa item) {
+    final deslocamento = rolagem.hasClients ? rolagem.offset : 0.0;
+    final destino = itens.indexWhere((t) => t.titulo == item.titulo) * altura;
+
+    return AnimatedPositioned(
+      key: ValueKey(voo),
+      duration: duracao,
+      curve: curva,
+      left: 0,
+      right: 0,
+      height: altura,
+      top: (decolou ? destino : origem) - deslocamento,
+      child: IgnorePointer(
+        child: TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0, end: 1),
+          duration: duracao,
+          builder: (context, t, filho) => Transform.rotate(
+            angle: math.sin(math.pi * t) * inclinacao,
+            child: filho,
+          ),
+          child: Material(
+            elevation: 8,
+            color: corItem,
+            shadowColor: Colors.black,
+            surfaceTintColor: Colors.transparent,
+            child: conteudo(item),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget linha(Tarefa item) {
     return Dismissible(
       key: ValueKey(item.titulo),
       background:
@@ -1000,72 +1151,79 @@ class _ListaState extends State<Lista> {
         }
         return false;
       },
-      child: Container(
-        height: 48,
-        padding: const EdgeInsets.only(left: 14, right: 8),
-        decoration: BoxDecoration(
-          color: cor,
-          border: const Border(bottom: BorderSide(color: divisor)),
-        ),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 22,
-              height: 22,
-              child: Checkbox(
-                value: item.feito,
-                onChanged: (_) => marcar(item),
-                shape: const CircleBorder(),
-                activeColor: textoFraco,
-                checkColor: fundo,
-                side: BorderSide(
-                  color: item.apagando ? Colors.white54 : acento,
-                  width: 1.6,
-                ),
-                visualDensity: VisualDensity.compact,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      child: conteudo(item),
+    );
+  }
+
+  Widget conteudo(Tarefa item) {
+    final cor = item.apagando ? const Color(0xFF4A2220) : corItem;
+    final tinta = item.feito ? textoFraco : texto;
+
+    return Container(
+      height: altura,
+      padding: const EdgeInsets.only(left: 14, right: 8),
+      decoration: BoxDecoration(
+        color: cor,
+        border: const Border(bottom: BorderSide(color: divisor)),
+      ),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 22,
+            height: 22,
+            child: Checkbox(
+              value: item.feito,
+              onChanged: (_) => marcar(item),
+              shape: const CircleBorder(),
+              activeColor: textoFraco,
+              checkColor: fundo,
+              side: BorderSide(
+                color: item.apagando ? Colors.white54 : acento,
+                width: 1.6,
+              ),
+              visualDensity: VisualDensity.compact,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Text(
+              item.titulo,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 14.5,
+                color: item.apagando ? Colors.white : tinta,
+                decorationColor: item.apagando ? Colors.white : tinta,
+                decoration: item.feito
+                    ? TextDecoration.lineThrough
+                    : TextDecoration.none,
               ),
             ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Text(
-                item.titulo,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 14.5,
-                  color: item.apagando ? Colors.white : tinta,
-                  decorationColor: item.apagando ? Colors.white : tinta,
-                  decoration: item.feito
-                      ? TextDecoration.lineThrough
-                      : TextDecoration.none,
-                ),
+          ),
+          const SizedBox(width: 8),
+          if (item.apagando)
+            TextButton(
+              onPressed: () => desfazer(item),
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                minimumSize: const Size(0, 30),
               ),
+              child: const Text(
+                'Desfazer',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              ),
+            )
+          else
+            IconButton(
+              onPressed: () => apagar(item),
+              icon: const Icon(Icons.close, size: 16),
+              color: textoFraco,
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
             ),
-            const SizedBox(width: 8),
-            if (item.apagando)
-              TextButton(
-                onPressed: () => desfazer(item),
-                style: TextButton.styleFrom(
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  minimumSize: const Size(0, 30),
-                ),
-                child: const Text(
-                  'Desfazer',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                ),
-              )
-            else
-              IconButton(
-                onPressed: () => apagar(item),
-                icon: const Icon(Icons.close, size: 16),
-                color: textoFraco,
-                visualDensity: VisualDensity.compact,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
-              ),
-          ],
-        ),
+        ],
       ),
     );
   }
