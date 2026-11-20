@@ -48,7 +48,10 @@ list instantly.
 
 ## Server sync
 
-The app talks to a PostgREST API provided by the course.
+The app talks to a PostgREST API provided by the course. Requests go through
+the browser's own `fetch`, called from Dart with `dart:js_interop`, so the app
+needs no packages beyond Flutter itself and runs in any DartPad without
+editing `pubspec.yaml`.
 
 | Action | Request |
 |---|---|
@@ -76,15 +79,14 @@ position, so the list reloads in the same order.
 | File | Description |
 |---|---|
 | `lib/main.dart` | The whole app: API calls, login, sign-up and task list screens |
-| `pubspec.yaml` | Dependencies (`http`) |
+| `pubspec.yaml` | Project metadata — no packages beyond Flutter |
 
 ## Running
 
-**DartPad:** paste `lib/main.dart` into [dartpad.dev](https://dartpad.dev).
-If DartPad reports that `package:http` is missing, add `http` under
-`dependencies` in its `pubspec.yaml` and run *Pub get*.
+**DartPad:** paste `lib/main.dart` into [dartpad.dev](https://dartpad.dev) and
+run it. Nothing else to configure.
 
-**Locally:**
+**Locally** (web only, since requests use the browser's `fetch`):
 
 ```bash
 flutter create .      # generates the platform folders, keeps lib/main.dart
@@ -94,4 +96,4 @@ flutter run -d chrome
 
 ## Stack
 
-Dart · Flutter · Material 3 · `package:http` · PostgREST
+Dart · Flutter · Material 3 · `dart:js_interop` · PostgREST

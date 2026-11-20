@@ -1,9 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 
 const base = 'https://barra.cos.ufrj.br/t5/rest';
 
@@ -68,15 +69,47 @@ class ApiErro implements Exception {
   ApiErro(this.status, this.mensagem);
 }
 
+class Resposta {
+  final int status;
+  final String corpo;
+
+  Resposta(this.status, this.corpo);
+}
+
 Map<String, String> cabecalhos([String? token]) => {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
       if (token != null) 'Authorization': 'Bearer $token',
     };
 
-String mensagemDoErro(http.Response r, String padrao) {
+Future<Resposta> requisitar(
+  String metodo,
+  String url,
+  Map<String, String> cabecalho, [
+  String? corpo,
+]) async {
+  final opcoes = JSObject();
+  opcoes['method'] = metodo.toJS;
+
+  final campos = JSObject();
+  cabecalho.forEach((nome, valor) => campos[nome] = valor.toJS);
+  opcoes['headers'] = campos;
+
+  if (corpo != null) opcoes['body'] = corpo.toJS;
+
+  final resposta = await globalContext
+      .callMethod<JSPromise<JSObject>>('fetch'.toJS, url.toJS, opcoes)
+      .toDart;
+  final status = resposta.getProperty<JSNumber>('status'.toJS).toDartInt;
+  final texto =
+      await resposta.callMethod<JSPromise<JSString>>('text'.toJS).toDart;
+
+  return Resposta(status, texto.toDart);
+}
+
+String mensagemDoErro(Resposta r, String padrao) {
   try {
-    final dados = jsonDecode(utf8.decode(r.bodyBytes));
+    final dados = jsonDecode(r.corpo);
     if (dados is Map && dados['message'] != null) return '${dados['message']}';
   } catch (_) {}
   return padrao;
@@ -88,10 +121,11 @@ Future<void> registrar(
   String celular,
   String senha,
 ) async {
-  final r = await http.post(
-    Uri.parse('$base/rpc/registra_usuario'),
-    headers: cabecalhos(),
-    body: jsonEncode({
+  final r = await requisitar(
+    'POST',
+    '$base/rpc/registra_usuario',
+    cabecalhos(),
+    jsonEncode({
       'nome': nome,
       'email': email,
       'senha': senha,
@@ -99,23 +133,24 @@ Future<void> registrar(
     }),
   );
 
-  if (r.statusCode != 200) {
-    throw ApiErro(r.statusCode, mensagemDoErro(r, 'Não foi possível cadastrar.'));
+  if (r.status != 200) {
+    throw ApiErro(r.status, mensagemDoErro(r, 'Não foi possível cadastrar.'));
   }
 }
 
 Future<Sessao> logar(String email, String senha) async {
-  final r = await http.post(
-    Uri.parse('$base/rpc/fazer_login'),
-    headers: cabecalhos(),
-    body: jsonEncode({'email': email, 'senha': senha}),
+  final r = await requisitar(
+    'POST',
+    '$base/rpc/fazer_login',
+    cabecalhos(),
+    jsonEncode({'email': email, 'senha': senha}),
   );
 
-  if (r.statusCode != 200) {
-    throw ApiErro(r.statusCode, mensagemDoErro(r, 'Não foi possível entrar.'));
+  if (r.status != 200) {
+    throw ApiErro(r.status, mensagemDoErro(r, 'Não foi possível entrar.'));
   }
 
-  final dados = jsonDecode(utf8.decode(r.bodyBytes));
+  final dados = jsonDecode(r.corpo);
   return Sessao(
     '${dados['nome'] ?? dados['email']}',
     dados['email'],
@@ -124,17 +159,18 @@ Future<Sessao> logar(String email, String senha) async {
 }
 
 Future<List<Tarefa>?> baixarTarefas(Sessao sessao) async {
-  final r = await http.get(
-    Uri.parse('$base/tarefas'),
-    headers: cabecalhos(sessao.token),
+  final r = await requisitar(
+    'GET',
+    '$base/tarefas',
+    cabecalhos(sessao.token),
   );
 
-  if (r.statusCode == 401) throw ApiErro(401, 'Sessão expirada.');
-  if (r.statusCode != 200) {
-    throw ApiErro(r.statusCode, mensagemDoErro(r, 'Falha ao ler a lista.'));
+  if (r.status == 401) throw ApiErro(401, 'Sessão expirada.');
+  if (r.status != 200) {
+    throw ApiErro(r.status, mensagemDoErro(r, 'Falha ao ler a lista.'));
   }
 
-  final registros = jsonDecode(utf8.decode(r.bodyBytes)) as List;
+  final registros = jsonDecode(r.corpo) as List;
   if (registros.isEmpty) return null;
 
   final valor = registros.first['valor'];
@@ -149,37 +185,39 @@ Future<List<Tarefa>?> baixarTarefas(Sessao sessao) async {
 }
 
 Future<bool> criarLista(Sessao sessao, List valor) async {
-  final r = await http.post(
-    Uri.parse('$base/tarefas'),
-    headers: cabecalhos(sessao.token),
-    body: jsonEncode({'email': sessao.email, 'valor': valor}),
+  final r = await requisitar(
+    'POST',
+    '$base/tarefas',
+    cabecalhos(sessao.token),
+    jsonEncode({'email': sessao.email, 'valor': valor}),
   );
 
-  if (r.statusCode == 401) throw ApiErro(401, 'Sessão expirada.');
-  if (r.statusCode == 409) return false;
-  if (r.statusCode != 201) {
-    throw ApiErro(r.statusCode, mensagemDoErro(r, 'Falha ao criar a lista.'));
+  if (r.status == 401) throw ApiErro(401, 'Sessão expirada.');
+  if (r.status == 409) return false;
+  if (r.status != 201) {
+    throw ApiErro(r.status, mensagemDoErro(r, 'Falha ao criar a lista.'));
   }
   return true;
 }
 
 Future<bool> salvarLista(Sessao sessao, List valor) async {
   final filtro = 'email=eq.${Uri.encodeQueryComponent(sessao.email)}';
-  final r = await http.patch(
-    Uri.parse('$base/tarefas?$filtro'),
-    headers: {
+  final r = await requisitar(
+    'PATCH',
+    '$base/tarefas?$filtro',
+    {
       ...cabecalhos(sessao.token),
       'Prefer': 'return=representation',
     },
-    body: jsonEncode({'valor': valor}),
+    jsonEncode({'valor': valor}),
   );
 
-  if (r.statusCode == 401) throw ApiErro(401, 'Sessão expirada.');
-  if (r.statusCode != 200) {
-    throw ApiErro(r.statusCode, mensagemDoErro(r, 'Falha ao salvar a lista.'));
+  if (r.status == 401) throw ApiErro(401, 'Sessão expirada.');
+  if (r.status != 200) {
+    throw ApiErro(r.status, mensagemDoErro(r, 'Falha ao salvar a lista.'));
   }
 
-  final linhas = jsonDecode(utf8.decode(r.bodyBytes)) as List;
+  final linhas = jsonDecode(r.corpo) as List;
   return linhas.isNotEmpty;
 }
 
