@@ -341,7 +341,8 @@ class _LoginState extends State<Login> {
         naoCadastrado = e.mensagem.contains('não encontrado');
         ocupado = false;
       });
-    } catch (_) {
+    } catch (e) {
+      debugPrint('falha na requisição: $e');
       if (!mounted) return;
       setState(() {
         erro = 'Não foi possível falar com o servidor.';
@@ -516,7 +517,8 @@ class _CadastroState extends State<Cadastro> {
         erro = e.mensagem;
         ocupado = false;
       });
-    } catch (_) {
+    } catch (e) {
+      debugPrint('falha na requisição: $e');
       if (!mounted) return;
       setState(() {
         erro = 'Não foi possível falar com o servidor.';
@@ -714,7 +716,8 @@ class _ListaState extends State<Lista> {
         carregando = false;
         status = e.mensagem;
       });
-    } catch (_) {
+    } catch (e) {
+      debugPrint('falha na requisição: $e');
       if (!mounted) return;
       setState(() {
         carregando = false;
@@ -751,7 +754,8 @@ class _ListaState extends State<Lista> {
         return;
       }
       setState(() => status = e.mensagem);
-    } catch (_) {
+    } catch (e) {
+      debugPrint('falha na requisição: $e');
       if (!mounted) return;
       setState(() => status = 'sem conexão com o servidor');
     }
